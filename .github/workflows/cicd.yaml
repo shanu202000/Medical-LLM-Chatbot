@@ -1,20 +1,21 @@
+
 name: Deploy Application Docker Image to EC2 instance
 
 on:
   push:
     branches: [main]
 
-
 jobs:
+
   Continuous-Integration:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -22,28 +23,33 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push image to Amazon ECR
-        id: build-image
+      - name: Build, tag and push Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
           IMAGE_TAG: latest
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .  
+          docker build --pull \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+
+          echo "Checking Docker startup command..."
+
+          docker image inspect \
+            $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            --format='{{json .Config.Cmd}}'
+
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
 
   Continuous-Deployment:
     needs: Continuous-Integration
     runs-on: self-hosted
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
 
+    steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -51,8 +57,62 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Run Docker Image to serve users
+      - name: Pull Docker image
+        env:
+          IMAGE_URI: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO }}:latest
         run: |
-         docker run -d -e AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" -e AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" -e AWS_DEFAULT_REGION="${{ secrets.AWS_DEFAULT_REGION }}" -e PINECONE_API_KEY="${{ secrets.PINECONE_API_KEY }}" -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" -p 8080:8080 "${{ steps.login-ecr.outputs.registry }}"/"${{ secrets.ECR_REPO }}":latest
+          docker pull "$IMAGE_URI"
+
+      - name: Stop and remove previous container
+        run: |
+          docker rm -f medical-chatbot || true
+
+      - name: Deploy Medical LLM Chatbot
+        env:
+          IMAGE_URI: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO }}:latest
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          docker run -d \
+            --name medical-chatbot \
+            --restart unless-stopped \
+            -p 8080:8080 \
+            -e PINECONE_API_KEY \
+            -e GROQ_API_KEY \
+            "$IMAGE_URI"
+
+      - name: Verify deployment
+        run: |
+          echo "Waiting for application to start..."
+
+          sleep 15
+
+          docker ps -a --filter name=medical-chatbot
+
+          echo "Checking container status..."
+
+          STATUS=$(docker inspect \
+            --format='{{.State.Status}}' medical-chatbot)
+
+          if [ "$STATUS" != "running" ]; then
+            echo "Container failed to start!"
+            docker logs medical-chatbot
+            exit 1
+          fi
+
+          echo "Checking application response..."
+
+          if ! curl --fail --silent \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-connrefused \
+            http://localhost:8080/; then
+
+            echo "Application health check failed!"
+            docker logs medical-chatbot
+            exit 1
+          fi
+
+          echo "Deployment successful!"
