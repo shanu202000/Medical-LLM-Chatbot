@@ -18,6 +18,12 @@ load_dotenv()
 PINECONE_API_KEY = os.environ.get('PINECONE_API_KEY')
 GROQ_API_KEY=os.getenv("GROQ_API_KEY")
 
+if not PINECONE_API_KEY:
+    raise RuntimeError("PINECONE_API_KEY is missing")
+
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY is missing")
+
 # Set environment variables explicitly if needed
 os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
 os.environ["GROQ_API_KEY"]=GROQ_API_KEY
@@ -68,4 +74,4 @@ def chat():
 
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port= 8080, debug= True)
+    app.run(host="0.0.0.0", port= 8080, debug= False)
